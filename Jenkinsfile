@@ -24,8 +24,9 @@ node {
     }
 
     withCredentials([file(credentialsId: JWT_KEY_CRED_ID, variable: 'jwt_key_file')]) {
-        stage('Deploye Code') {
-            if (isUnix()) {
+        stage('Deploy Code') {
+            def rc
+			if (isUnix()) {
                 rc = sh returnStatus: true, script: "${toolbelt2} auth:jwt:grant --clientid ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwtkeyfile ${jwt_key_file} --setdefaultdevhubusername --instanceurl ${SFDC_HOST}"
             }else{
 		    //bat "${toolbelt2} plugins:install salesforcedx@49.5.0"
@@ -45,6 +46,7 @@ node {
 			println rc
 			
 			// need to pull out assigned username
+			def rmsg
 			if (isUnix()) {
 				//rmsg = sh returnStdout: true, script: "${} force:mdapi:deploy -d manifest/. -u ${HUB_ORG}"
 				rmsg = sh returnStdout: true, script: "${} force:source:deploy -x manifest/package.xml -u ${HUB_ORG}"
