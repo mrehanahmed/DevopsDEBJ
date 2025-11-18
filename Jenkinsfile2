@@ -24,7 +24,8 @@ node {
     }
 
     withCredentials([file(credentialsId: JWT_KEY_CRED_ID, variable: 'jwt_key_file')]) {
-        stage('Deploye Code') {
+        stage('Deploy Code') {
+            def rc
             if (isUnix()) {
                 // SFDX: auth:jwt:grant --> SF: org:login:jwt
                 rc = sh returnStatus: true, script: "${toolbelt} org login jwt --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file ${jwt_key_file} --set-default-dev-hub --instance-url ${SFDC_HOST}"
@@ -47,6 +48,7 @@ node {
             println rc
             
             // need to pull out assigned username
+            def rmsg
             if (isUnix()) {
                 // SFDX: force:source:deploy --> SF: project:deploy:start
                 rmsg = sh returnStdout: true, script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG}"
