@@ -27,13 +27,13 @@ node {
         stage('Deploye Code') {
             if (isUnix()) {
                 // SFDX: auth:jwt:grant --> SF: org:login:jwt
-                rc = sh returnStatus: true, script: "${toolbelt} org:login:jwt --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file ${jwt_key_file} --set-default-dev-hub --instance-url ${SFDC_HOST}"
+                rc = sh returnStatus: true, script: "${toolbelt} org login jwt --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file ${jwt_key_file} --set-default-dev-hub --instance-url ${SFDC_HOST}"
             }else{
                 //bat "${toolbelt} plugins:install salesforcedx@49.5.0"
-                bat "${toolbelt} update"
+                //bat "${toolbelt} update"
                 //bat "${toolbelt} auth:logout -u ${HUB_ORG} -p" 
                 // SFDX: auth:jwt:grant --> SF: org:login:jwt
-                rc = bat returnStatus: true, script: "${toolbelt} org:login:jwt --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file ${jwt_key_file} --set-default-dev-hub --instance-url ${SFDC_HOST}"
+                rc = bat returnStatus: true, script: "${toolbelt} org login jwt --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file ${jwt_key_file} --set-default-dev-hub --instance-url ${SFDC_HOST}"
             }
         
             if (rc != 0) { 
@@ -49,10 +49,10 @@ node {
             // need to pull out assigned username
             if (isUnix()) {
                 // SFDX: force:source:deploy --> SF: project:deploy:start
-                rmsg = sh returnStdout: true, script: "${toolbelt} project:deploy:start --manifest manifest/package.xml --target-org ${HUB_ORG}"
+                rmsg = sh returnStdout: true, script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG}"
             }else{
                 // SFDX: force:source:deploy --> SF: project:deploy:start
-                rmsg = bat returnStdout: true, script: "${toolbelt} project:deploy:start --manifest manifest/package.xml --target-org ${HUB_ORG}"
+                rmsg = bat returnStdout: true, script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG}"
             }
               
             printf rmsg
