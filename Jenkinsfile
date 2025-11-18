@@ -49,10 +49,10 @@ node {
 			def rmsg
 			if (isUnix()) {
 				//rmsg = sh returnStdout: true, script: "${toolbelt2} force:mdapi:deploy -d manifest/. -u ${HUB_ORG}"
-				rmsg = sh returnStdout: true, script: "${toolbelt2} force:source:deploy -x manifest/package.xml -u ${HUB_ORG}"
+				rmsg = sh returnStdout: true, script: "${toolbelt2}  project deploy start -x manifest/package.xml -u ${HUB_ORG}"
 			}else{
 				rmsg = bat returnStdout: true, script: "${toolbelt2} force:source:deploy -x manifest/package.xml -u ${HUB_ORG}"
-			   //rmsg = bat returnStdout: true, script: "${toolbelt2} force:mdapi:deploy -d manifest/. -u ${HUB_ORG}"
+			   //rmsg = bat returnStdout: true, script: "${toolbelt2}  project deploy start -d manifest/. -u ${HUB_ORG}"
 			}
 			  
             //printf rmsg
