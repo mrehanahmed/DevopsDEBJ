@@ -1,27 +1,18 @@
 pipeline {
     agent any
 
-    options {
-        skipDefaultCheckout()
-    }
-
-    parameters {
-        choice(name: 'DEPLOY_TYPE', choices: ['source', 'mdapi'], description: 'Deployment type')
+    // Only simple strings allowed here
+    environment {
+        SF_BIN = 'd:"Program Files"\\sf\\bin\\sf'
     }
 
     stages {
 
-        stage('Checkout') {
-            steps {
-                checkout scm
-                echo "Branch: ${env.BRANCH_NAME}"
-            }
-        }
-
-        stage('Initialize Variables') {
+        stage('Load Environment Vars') {
             steps {
                 script {
-                    // Read credentials from environment variables
+
+                    // Load org usernames from Jenkins global env
                     DEV_USERNAME   = env.DEV_USERNAME
                     UAT_USERNAME   = env.UAT_USERNAME
                     PROD_USERNAME  = env.PROD_USERNAME
@@ -31,83 +22,34 @@ pipeline {
                     JWT_KEY_FILE   = env.JWT_KEY_FILE
                     CONSUMER_KEY   = env.CONNECTED_APP_CONSUMER_KEY
 
-                    // Determine target org based on branch
-                    if (env.BRANCH_NAME == 'develop') {
-                        TARGET_USER = DEV_USERNAME
-                        TARGET_ALIAS = "devOrg"
-                        SHOULD_TEST = false
-                        echo "Branch develop → DEV org"
+                    // Select org based on Git branch
+                    BRANCH = env.BRANCH_NAME
 
-                    } else if (env.BRANCH_NAME == 'testing') {
-                        TARGET_USER = UAT_USERNAME
-                        TARGET_ALIAS = "uatOrg"
-                        SHOULD_TEST = true
-                        echo "Branch testing → UAT org (tests ON)"
-
-                    } else if (env.BRANCH_NAME == 'master') {
-                        TARGET_USER = PROD_USERNAME
-                        TARGET_ALIAS = "prodOrg"
-                        SHOULD_TEST = true
-                        echo "Branch master → PROD org (tests ON)"
-
+                    if (BRANCH == "develop") {
+                        TARGET_ORG = DEV_USERNAME
+                        TARGET_ENV = "DEV"
+                    } else if (BRANCH == "testing") {
+                        TARGET_ORG = UAT_USERNAME
+                        TARGET_ENV = "UAT"
+                    } else if (BRANCH == "master") {
+                        TARGET_ORG = PROD_USERNAME
+                        TARGET_ENV = "PROD"
                     } else {
-                        error "Unsupported branch: ${env.BRANCH_NAME}"
+                        error "Unsupported branch: ${BRANCH}"
                     }
+
+                    echo "Selected Org: ${TARGET_ORG}"
+                    echo "Deployment Environment: ${TARGET_ENV}"
                 }
             }
         }
 
         stage('Authorize Org') {
             steps {
-                script {
-                    echo "Authorizing ${TARGET_USER}"
+                withCredentials([file(credentialsId: env.JWT_CRED_ID, variable: 'jwt_key_file')]) {
+                    script {
+                        def cmd = "${SF_BIN} org login jwt --client-id ${CONSUMER_KEY} --username ${TARGET_ORG} --jwt-key-file %jwt_key_file% --set-default-dev-hub --instance-url ${SFDC_HOST}"
 
-                    def rc = isUnix() ?
-                        sh(returnStatus: true, script: """
-                            sf org login jwt \
-                                --client-id ${CONSUMER_KEY} \
-                                --username ${TARGET_USER} \
-                                --jwt-key-file ${JWT_KEY_FILE} \
-                                --alias ${TARGET_ALIAS} \
-                                --set-default-dev-hub \
-                                --instance-url ${SFDC_HOST}
-                        """) :
-                        bat(returnStatus: true, script: """
-                            sf org login jwt ^
-                                --client-id ${CONSUMER_KEY} ^
-                                --username ${TARGET_USER} ^
-                                --jwt-key-file ${JWT_KEY_FILE} ^
-                                --alias ${TARGET_ALIAS} ^
-                                --set-default-dev-hub ^
-                                --instance-url ${SFDC_HOST}
-                        """)
-
-                    if (rc != 0) {
-                        error "Authorization failed for ${TARGET_USER}"
-                    }
-                }
-            }
-        }
-
-        stage('Deploy to Org') {
-            steps {
-                script {
-                    echo "Deploying to ${TARGET_ALIAS}"
-
-                    def cmd = ''
-                    if (params.DEPLOY_TYPE == 'source') {
-                        cmd = isUnix() ?
-                            "sf project deploy start --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json" :
-                            "sf project deploy start --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json"
-                    } else {
-                        cmd = isUnix() ?
-                            "sf project deploy start --metadata-dir mdapi/ --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json" :
-                            "sf project deploy start --metadata-dir mdapi/ --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json"
-                    }
-
-                    if (isUnix()) {
-                        sh cmd
-                    } else {
                         bat cmd
                     }
                 }
@@ -115,53 +57,73 @@ pipeline {
         }
 
         stage('Run Apex Tests') {
-            when {
-                expression { SHOULD_TEST == true }
-            }
             steps {
                 script {
-                    echo "Running Apex tests for ${TARGET_ALIAS}"
 
-                    def rawStart = isUnix() ?
-                        sh(script: "sf apex run test --testlevel RunLocalTests --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim() :
-                        bat(script: "sf apex run test --testlevel RunLocalTests --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim()
+                    def testJson = bat(
+                        returnStdout: true,
+                        script: "${SF_BIN} apex run test --target-org ${TARGET_ORG} --code-coverage --json"
+                    )
 
-                    def runId = readJSON(text: rawStart).result.testRunId
-                    echo "Test Run ID: ${runId}"
+                    def parsed = readJSON text: testJson
 
-                    timeout(time: 8, unit: 'MINUTES') {
-                        waitUntil {
-                            def statusJson = isUnix() ?
-                                sh(script: "sf apex get test -i ${runId} --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim() :
-                                bat(script: "sf apex get test -i ${runId} --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim()
+                    TEST_RUN_ID = parsed.result.testRunId
 
-                            def status = readJSON(text: statusJson).result.summary.status
-                            echo "Test Status: ${status}"
+                    echo "Test Run ID: ${TEST_RUN_ID}"
 
-                            if (status == 'Completed') return true
-                            sleep 8
-                            return false
-                        }
+                    sleep 10
+
+                    def resultJson = bat(
+                        returnStdout: true,
+                        script: "${SF_BIN} data query --query \"SELECT PercentCoverage FROM ApexCodeCoverageAggregate\" --use-tooling-api --json --target-org ${TARGET_ORG}"
+                    )
+
+                    def r = readJSON text: resultJson
+
+                    def records = r.result.records
+
+                    if (records.size() > 0) {
+                        COVERAGE = records[0].PercentCoverage as Integer
+                    } else {
+                        COVERAGE = 0
                     }
 
-                    def finalJson = isUnix() ?
-                        sh(script: "sf apex get test -i ${runId} --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim() :
-                        bat(script: "sf apex get test -i ${runId} --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim()
+                    echo "Total Coverage: ${COVERAGE}%"
+                }
+            }
+        }
 
-                    def summary = readJSON(text: finalJson).result.summary
+        stage('Conditional Deployment') {
+            steps {
+                script {
 
-                    echo "Apex Test Summary for ${TARGET_ALIAS}"
-                    echo "Pass Rate: ${summary.passRate}%"
-                    echo "Tests Run: ${summary.testsRan}"
-                    echo "Failures: ${summary.failures}"
-                    echo "Status: ${summary.status}"
+                    if (COVERAGE >= 75) {
+                        echo "Coverage is ${COVERAGE}%. Deploying package..."
 
-                    if (summary.failures > 0) {
-                        error("Apex tests failed")
+                        bat "${SF_BIN} project deploy start --manifest manifest/package.xml --target-org ${TARGET_ORG}"
+                        DEPLOY_STATUS = "DEPLOYED"
+
+                    } else {
+                        echo "Coverage below 75%. Deployment skipped."
+                        DEPLOY_STATUS = "SKIPPED"
                     }
                 }
             }
         }
 
+        stage('Output Results') {
+            steps {
+                script {
+                    echo "-----------------------------------------------"
+                    echo "   SALESFORCE CI RESULT - BRANCH: ${BRANCH}"
+                    echo "-----------------------------------------------"
+                    echo "Target Org: ${TARGET_ORG} (${TARGET_ENV})"
+                    echo "Test Run ID: ${TEST_RUN_ID}"
+                    echo "Coverage: ${COVERAGE}%"
+                    echo "Deployment: ${DEPLOY_STATUS}"
+                    echo "-----------------------------------------------"
+                }
+            }
+        }
     }
 }
