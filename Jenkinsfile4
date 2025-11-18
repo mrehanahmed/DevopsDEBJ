@@ -9,19 +9,6 @@ pipeline {
         choice(name: 'DEPLOY_TYPE', choices: ['source', 'mdapi'], description: 'Deployment type')
     }
 
-    environment {
-        // Org usernames
-        DEV_USERNAME   = ${DEV_USERNAME}
-        UAT_USERNAME   = ${UAT_USERNAME}
-        PROD_USERNAME  = ${PROD_USERNAME}
-
-        // Salesforce env variables
-        HUB_ORG        = ${HUB_ORG}
-        SFDC_HOST      = ${SFDC_HOST}
-        JWT_KEY_FILE   = ${JWT_KEY_FILE}
-        CONSUMER_KEY   = ${CONNECTED_APP_CONSUMER_KEY}
-    }
-
     stages {
 
         stage('Checkout') {
@@ -31,9 +18,20 @@ pipeline {
             }
         }
 
-        stage('Select Target Org') {
+        stage('Initialize Variables') {
             steps {
                 script {
+                    // Read credentials from environment variables
+                    DEV_USERNAME   = env.DEV_USERNAME
+                    UAT_USERNAME   = env.UAT_USERNAME
+                    PROD_USERNAME  = env.PROD_USERNAME
+
+                    HUB_ORG        = env.HUB_ORG
+                    SFDC_HOST      = env.SFDC_HOST
+                    JWT_KEY_FILE   = env.JWT_KEY_FILE
+                    CONSUMER_KEY   = env.CONNECTED_APP_CONSUMER_KEY
+
+                    // Determine target org based on branch
                     if (env.BRANCH_NAME == 'develop') {
                         TARGET_USER = DEV_USERNAME
                         TARGET_ALIAS = "devOrg"
@@ -61,9 +59,9 @@ pipeline {
 
         stage('Authorize Org') {
             steps {
-                echo "[Authorizing ${TARGET_USER}"
-
                 script {
+                    echo "Authorizing ${TARGET_USER}"
+
                     def rc = isUnix() ?
                         sh(returnStatus: true, script: """
                             sf org login jwt \
@@ -75,7 +73,7 @@ pipeline {
                                 --instance-url ${SFDC_HOST}
                         """) :
                         bat(returnStatus: true, script: """
-                            ${tool 'toolbelt'} org login jwt ^
+                            sf org login jwt ^
                                 --client-id ${CONSUMER_KEY} ^
                                 --username ${TARGET_USER} ^
                                 --jwt-key-file ${JWT_KEY_FILE} ^
@@ -94,23 +92,23 @@ pipeline {
         stage('Deploy to Org') {
             steps {
                 script {
+                    echo "Deploying to ${TARGET_ALIAS}"
+
+                    def cmd = ''
                     if (params.DEPLOY_TYPE == 'source') {
-                        echo "Deploying source to ${TARGET_ALIAS}"
-
-                        def cmd = isUnix() ?
+                        cmd = isUnix() ?
                             "sf project deploy start --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json" :
-                            "${tool 'toolbelt'} project deploy start --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json"
-
-                        bat returnStdout: true, script: cmd
-
+                            "sf project deploy start --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json"
                     } else {
-                        echo "Deploying MDAPI to ${TARGET_ALIAS}"
-
-                        def cmd = isUnix() ?
+                        cmd = isUnix() ?
                             "sf project deploy start --metadata-dir mdapi/ --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json" :
-                            "${tool 'toolbelt'} project deploy start --metadata-dir mdapi/ --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json"
+                            "sf project deploy start --metadata-dir mdapi/ --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json"
+                    }
 
-                        bat returnStdout: true, script: cmd
+                    if (isUnix()) {
+                        sh cmd
+                    } else {
+                        bat cmd
                     }
                 }
             }
@@ -121,9 +119,9 @@ pipeline {
                 expression { SHOULD_TEST == true }
             }
             steps {
-                echo "Running Apex tests for ${TARGET_ALIAS}"
-
                 script {
+                    echo "Running Apex tests for ${TARGET_ALIAS}"
+
                     def rawStart = isUnix() ?
                         sh(script: "sf apex run test --testlevel RunLocalTests --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim() :
                         bat(script: "sf apex run test --testlevel RunLocalTests --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim()
@@ -152,19 +150,18 @@ pipeline {
 
                     def summary = readJSON(text: finalJson).result.summary
 
-                    echo "------------------------------------------"
-                    echo " Apex Test Summary for ${TARGET_ALIAS}"
-                    echo " Pass Rate: ${summary.passRate}%"
-                    echo " Tests Run: ${summary.testsRan}"
-                    echo " Failures: ${summary.failures}"
-                    echo " Status: ${summary.status}"
-                    echo "------------------------------------------"
+                    echo "Apex Test Summary for ${TARGET_ALIAS}"
+                    echo "Pass Rate: ${summary.passRate}%"
+                    echo "Tests Run: ${summary.testsRan}"
+                    echo "Failures: ${summary.failures}"
+                    echo "Status: ${summary.status}"
 
                     if (summary.failures > 0) {
-                        error("❌ Apex tests failed.")
+                        error("Apex tests failed")
                     }
                 }
             }
         }
+
     }
 }
