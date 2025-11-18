@@ -18,7 +18,7 @@ node {
     def CONNECTED_APP_CONSUMER_KEY = env.CONNECTED_APP_CONSUMER_KEY_DH
     def toolbelt = tool 'toolbelt'
 
-    // Only store SIMPLE VALUES here (serializable)
+    // Only store simple serializable values
     def testCoverage = 0
     def deployStatus = "NOT RUN"
     def testSummary = ""
@@ -56,7 +56,6 @@ node {
             def cleanTest = extractJson(rawTest)
             def json = new JsonSlurper().parseText(cleanTest)
 
-            // Extract only simple fields
             testCoverage = json?.result?.summary?.orgWideCoverage ?: 0
             testSummary = "Test Run ID: ${json?.result?.testRunId}, Coverage: ${testCoverage}%"
 
@@ -82,24 +81,20 @@ node {
         }
     }
 
-    stage('Send Email') {
-
-        def subject = "SF Deployment Result (Build #${BUILD_NUMBER})"
-        def body = """
-Build Number: ${BUILD_NUMBER}
-Org: ${HUB_ORG}
-
-Test Coverage: ${testCoverage}%
-Test Summary: ${testSummary}
-
-Deployment: ${deployStatus}
-Deployment Details: ${deploySummary}
-"""
-
-        emailext(
-            to: 'admin@example.com',
-            subject: subject,
-            body: body
-        )
+    stage('Output Results') {
+        echo "============================================="
+        echo "  SALESFORCE CI RESULT - BUILD #${BUILD_NUMBER}"
+        echo "============================================="
+        echo "Org: ${HUB_ORG}"
+        echo ""
+        echo "TEST RESULTS"
+        echo "------------"
+        echo "${testSummary}"
+        echo ""
+        echo "DEPLOYMENT"
+        echo "----------"
+        echo "Status: ${deployStatus}"
+        echo "${deploySummary}"
+        echo "============================================="
     }
 }
