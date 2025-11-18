@@ -1,10 +1,18 @@
 #!groovy
-import groovy.json.JsonSlurperClassic
+import groovy.json.JsonSlurper
+
+// --- SAFE JSON EXTRACTOR (WORKS ON WINDOWS/UNIX) ---
+String extractJson(String raw) {
+    def start = raw.indexOf('{')
+    if (start < 0) {
+        error "No JSON found in output:\n${raw}"
+    }
+    return raw.substring(start).trim()
+}
 
 node {
 
     def BUILD_NUMBER = env.BUILD_NUMBER
-    def SFDC_USERNAME
     def HUB_ORG = env.HUB_ORG_DH
     def SFDC_HOST = env.SFDC_HOST_DH
     def JWT_KEY_CRED_ID = env.JWT_CRED_ID_DH
@@ -12,7 +20,7 @@ node {
     def toolbelt = tool 'toolbelt'
 
     def testResult
-    def testCoverage
+    def testCoverage = 0
     def deployResult
     def shouldDeploy = false
 
@@ -26,20 +34,18 @@ node {
             def rc
 
             if (isUnix()) {
-                rc = sh returnStatus: true,
-                    script: """
-                        ${toolbelt} org login jwt \
-                        --client-id ${CONNECTED_APP_CONSUMER_KEY} \
-                        --username ${HUB_ORG} \
-                        --jwt-key-file ${jwt_key_file} \
-                        --set-default-dev-hub \
-                        --instance-url ${SFDC_HOST}
-                    """
+                rc = sh returnStatus: true, script: """
+                    ${toolbelt} org login jwt \
+                    --client-id ${CONNECTED_APP_CONSUMER_KEY} \
+                    --username ${HUB_ORG} \
+                    --jwt-key-file ${jwt_key_file} \
+                    --set-default-dev-hub \
+                    --instance-url ${SFDC_HOST}
+                """
             } else {
-                rc = bat returnStatus: true,
-                    script: """
-                        ${toolbelt} org login jwt --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file ${jwt_key_file} --set-default-dev-hub --instance-url ${SFDC_HOST}
-                    """
+                rc = bat returnStatus: true, script: """
+                    ${toolbelt} org login jwt --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file ${jwt_key_file} --set-default-dev-hub --instance-url ${SFDC_HOST}
+                """
             }
 
             if (rc != 0) {
@@ -48,67 +54,72 @@ node {
         }
 
         stage('Run Apex Tests') {
-            echo "Running all Apex tests with code coverage…"
+            echo "Running Apex tests..."
 
-            def raw
+            def rawTest
 
             if (isUnix()) {
-                raw = sh returnStdout: true,
-                      script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json"
+                rawTest = sh returnStdout: true,
+                    script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json"
             } else {
-                raw = bat returnStdout: true,
-                      script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json"
+                rawTest = bat returnStdout: true,
+                    script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json"
             }
 
-            echo "RAW TEST RESULT JSON:"
-            echo raw
+            echo "RAW TEST OUTPUT:"
+            echo rawTest
 
-            def json = new JsonSlurperClassic().parseText(raw)
+            def cleanTest = extractJson(rawTest)
+            def jsonTest = new JsonSlurper().parseText(cleanTest)
 
-            testResult = json
-            testCoverage = json.result.summary.orgWideCoverage
+            testResult = jsonTest
 
-            echo "Org-wide Test Coverage = ${testCoverage}%"
+            if (jsonTest?.result?.summary?.orgWideCoverage != null) {
+                testCoverage = jsonTest.result.summary.orgWideCoverage
+            }
+
+            echo "Org-wide Coverage = ${testCoverage}%"
 
             if (testCoverage >= 75) {
-                echo "Coverage ≥ 75%. Deployment allowed."
+                echo "Coverage sufficient. Deployment allowed."
                 shouldDeploy = true
             } else {
-                echo "Coverage < 75%. Deployment will NOT proceed."
+                echo "Coverage too low (${testCoverage}%). Deployment skipped."
                 shouldDeploy = false
             }
         }
 
         stage('Conditional Deployment') {
+
             if (!shouldDeploy) {
-                echo "Skipping deployment because coverage is below threshold."
                 deployResult = "SKIPPED — Coverage ${testCoverage}%"
+                echo deployResult
                 return
             }
 
-            echo "Deploying metadata to Salesforce using manifest/package.xml…"
+            echo "Deploying metadata..."
 
-            def rmsg
-
+            def rawDeploy
             if (isUnix()) {
-                rmsg = sh returnStdout: true,
-                     script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json"
+                rawDeploy = sh returnStdout: true,
+                    script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json"
             } else {
-                rmsg = bat returnStdout: true,
-                     script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json"
+                rawDeploy = bat returnStdout: true,
+                    script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json"
             }
 
-            echo "Deployment Output:"
-            echo rmsg
+            echo "RAW DEPLOY OUTPUT:"
+            echo rawDeploy
 
-            deployResult = rmsg
+            def cleanDeploy = extractJson(rawDeploy)
+            deployResult = new JsonSlurper().parseText(cleanDeploy)
         }
     }
 
     stage('Send Email Notification') {
-        echo "Sending email about build/test/deploy status…"
+        echo "Sending email..."
 
-        def subject = "SF Deployment Result - Build #${BUILD_NUMBER}"
+        def subject = "SF Deployment Result (Build #${BUILD_NUMBER})"
         def body = """
 Build Number: ${BUILD_NUMBER}
 Org: ${HUB_ORG}
@@ -116,14 +127,14 @@ Org: ${HUB_ORG}
 Test Coverage: ${testCoverage}%
 Deployment Status: ${shouldDeploy ? "DEPLOYED" : "NOT DEPLOYED"}
 
-Raw Test Result:
+Test Run Result:
 ${testResult}
 
-Raw Deployment Result:
+Deploy Result:
 ${deployResult}
 """
 
-        emailext (
+        emailext(
             to: 'admin@example.com',
             subject: subject,
             body: body
