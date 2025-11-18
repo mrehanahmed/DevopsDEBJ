@@ -1,169 +1,33 @@
-pipeline {
-    agent any
-
-    options {
-        skipDefaultCheckout()
+stage('Notify Slack') {
+    when {
+        expression { return env.SLACK_CHANNEL }
     }
-
-    parameters {
-        choice(name: 'DEPLOY_TYPE', choices: ['source', 'mdapi'], description: 'Deployment type')
+    steps {
+        script {
+            slackSend(
+                channel: env.SLACK_CHANNEL,
+                message: "Branch: ${BRANCH}\nOrg: ${TARGET_ENV}\nCoverage: ${COVERAGE}%\nDeployment: ${DEPLOY_STATUS}"
+            )
+        }
     }
+}
 
-    environment {
-        // Org usernames
-        DEV_USERNAME   = env.DEV_USERNAME
-        UAT_USERNAME   = env.UAT_USERNAME
-        PROD_USERNAME  = env.PROD_USERNAME
-
-        // Salesforce env variables
-        HUB_ORG        = env.HUB_ORG
-        SFDC_HOST      = env.SFDC_HOST
-        JWT_KEY_FILE   = env.JWT_KEY_FILE
-        CONSUMER_KEY   = env.CONNECTED_APP_CONSUMER_KEY
+stage('Notify Teams') {
+    when {
+        expression { return env.TEAMS_ENABLED == 'true' }
     }
+    steps {
+        withCredentials([string(credentialsId: 'TEAMS_WEBHOOK_URL', variable: 'TEAMS_URL')]) {
+            script {
+                def json = """{
+                    "text": "Branch: ${BRANCH}\nOrg: ${TARGET_ENV}\nCoverage: ${COVERAGE}%\nDeployment: ${DEPLOY_STATUS}"
+                }"""
 
-    stages {
+                writeFile file: 'teams_payload.json', text: json
 
-        stage('Checkout') {
-            steps {
-                checkout scm
-                echo "Branch: ${env.BRANCH_NAME}"
-            }
-        }
-
-        stage('Select Target Org') {
-            steps {
-                script {
-                    if (env.BRANCH_NAME == 'develop') {
-                        TARGET_USER = DEV_USERNAME
-                        TARGET_ALIAS = "devOrg"
-                        SHOULD_TEST = false
-                        echo "🌱 Branch develop → DEV org"
-
-                    } else if (env.BRANCH_NAME == 'testing') {
-                        TARGET_USER = UAT_USERNAME
-                        TARGET_ALIAS = "uatOrg"
-                        SHOULD_TEST = true
-                        echo "🧪 Branch testing → UAT org (tests ON)"
-
-                    } else if (env.BRANCH_NAME == 'master') {
-                        TARGET_USER = PROD_USERNAME
-                        TARGET_ALIAS = "prodOrg"
-                        SHOULD_TEST = true
-                        echo "🔥 Branch master → PROD org (tests ON)"
-
-                    } else {
-                        error "❌ Unsupported branch: ${env.BRANCH_NAME}"
-                    }
-                }
-            }
-        }
-
-        stage('Authorize Org') {
-            steps {
-                echo "\u001B[32m✔ Authorizing ${TARGET_USER}\u001B[0m"
-
-                script {
-                    def rc = isUnix() ?
-                        sh(returnStatus: true, script: """
-                            sf org login jwt \
-                                --client-id ${CONSUMER_KEY} \
-                                --username ${TARGET_USER} \
-                                --jwt-key-file ${JWT_KEY_FILE} \
-                                --alias ${TARGET_ALIAS} \
-                                --set-default-dev-hub \
-                                --instance-url ${SFDC_HOST}
-                        """) :
-                        bat(returnStatus: true, script: """
-                            ${tool 'toolbelt'} org login jwt ^
-                                --client-id ${CONSUMER_KEY} ^
-                                --username ${TARGET_USER} ^
-                                --jwt-key-file ${JWT_KEY_FILE} ^
-                                --alias ${TARGET_ALIAS} ^
-                                --set-default-dev-hub ^
-                                --instance-url ${SFDC_HOST}
-                        """)
-
-                    if (rc != 0) {
-                        error "❌ Authorization failed for ${TARGET_USER}"
-                    }
-                }
-            }
-        }
-
-        stage('Deploy to Org') {
-            steps {
-                script {
-                    if (params.DEPLOY_TYPE == 'source') {
-                        echo "🚀 Deploying source to ${TARGET_ALIAS}"
-
-                        def cmd = isUnix() ?
-                            "sf project deploy start --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json" :
-                            "${tool 'toolbelt'} project deploy start --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json"
-
-                        bat returnStdout: true, script: cmd
-
-                    } else {
-                        echo "🚀 Deploying MDAPI to ${TARGET_ALIAS}"
-
-                        def cmd = isUnix() ?
-                            "sf project deploy start --metadata-dir mdapi/ --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json" :
-                            "${tool 'toolbelt'} project deploy start --metadata-dir mdapi/ --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json"
-
-                        bat returnStdout: true, script: cmd
-                    }
-                }
-            }
-        }
-
-        stage('Run Apex Tests') {
-            when {
-                expression { SHOULD_TEST == true }
-            }
-            steps {
-                echo "🧪 Running Apex tests for ${TARGET_ALIAS}"
-
-                script {
-                    def rawStart = isUnix() ?
-                        sh(script: "sf apex run test --testlevel RunLocalTests --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim() :
-                        bat(script: "sf apex run test --testlevel RunLocalTests --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim()
-
-                    def runId = readJSON(text: rawStart).result.testRunId
-                    echo "⏳ Test Run ID: ${runId}"
-
-                    timeout(time: 8, unit: 'MINUTES') {
-                        waitUntil {
-                            def statusJson = isUnix() ?
-                                sh(script: "sf apex get test -i ${runId} --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim() :
-                                bat(script: "sf apex get test -i ${runId} --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim()
-
-                            def status = readJSON(text: statusJson).result.summary.status
-                            echo "Test Status: ${status}"
-
-                            if (status == 'Completed') return true
-                            sleep 8
-                            return false
-                        }
-                    }
-
-                    def finalJson = isUnix() ?
-                        sh(script: "sf apex get test -i ${runId} --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim() :
-                        bat(script: "sf apex get test -i ${runId} --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim()
-
-                    def summary = readJSON(text: finalJson).result.summary
-
-                    echo "------------------------------------------"
-                    echo " Apex Test Summary for ${TARGET_ALIAS}"
-                    echo " Pass Rate: ${summary.passRate}%"
-                    echo " Tests Run: ${summary.testsRan}"
-                    echo " Failures: ${summary.failures}"
-                    echo " Status: ${summary.status}"
-                    echo "------------------------------------------"
-
-                    if (summary.failures > 0) {
-                        error("❌ Apex tests failed.")
-                    }
-                }
+                bat """
+                    curl -X POST -H "Content-Type: application/json" -d @teams_payload.json "%TEAMS_URL%"
+                """
             }
         }
     }
