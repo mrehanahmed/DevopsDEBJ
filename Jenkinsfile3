@@ -9,7 +9,7 @@ pipeline {
 
         stage('Auth to Org') {
             steps {
-                echo "\u001B[32m✔ Authorizing ${SF_USERNAME}\u001B[0m"
+                echo "[ Authorizing ${SF_USERNAME}"
 
                 withCredentials([file(credentialsId: 'jwt-key', variable: 'JWT_KEY')]) {
                     bat """
