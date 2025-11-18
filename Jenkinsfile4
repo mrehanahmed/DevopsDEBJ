@@ -11,15 +11,15 @@ pipeline {
 
     environment {
         // Org usernames
-        DEV_USERNAME   = env.DEV_USERNAME
-        UAT_USERNAME   = env.UAT_USERNAME
-        PROD_USERNAME  = env.PROD_USERNAME
+        DEV_USERNAME   = ${DEV_USERNAME}
+        UAT_USERNAME   = ${UAT_USERNAME}
+        PROD_USERNAME  = ${PROD_USERNAME}
 
         // Salesforce env variables
-        HUB_ORG        = env.HUB_ORG
-        SFDC_HOST      = env.SFDC_HOST
-        JWT_KEY_FILE   = env.JWT_KEY_FILE
-        CONSUMER_KEY   = env.CONNECTED_APP_CONSUMER_KEY
+        HUB_ORG        = ${HUB_ORG}
+        SFDC_HOST      = ${SFDC_HOST}
+        JWT_KEY_FILE   = ${JWT_KEY_FILE}
+        CONSUMER_KEY   = ${CONNECTED_APP_CONSUMER_KEY}
     }
 
     stages {
