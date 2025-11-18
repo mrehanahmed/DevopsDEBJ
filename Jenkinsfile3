@@ -1,0 +1,132 @@
+#!groovy
+import groovy.json.JsonSlurperClassic
+
+node {
+
+    def BUILD_NUMBER = env.BUILD_NUMBER
+    def SFDC_USERNAME
+    def HUB_ORG = env.HUB_ORG_DH
+    def SFDC_HOST = env.SFDC_HOST_DH
+    def JWT_KEY_CRED_ID = env.JWT_CRED_ID_DH
+    def CONNECTED_APP_CONSUMER_KEY = env.CONNECTED_APP_CONSUMER_KEY_DH
+    def toolbelt = tool 'toolbelt'
+
+    def testResult
+    def testCoverage
+    def deployResult
+    def shouldDeploy = false
+
+    stage('Checkout Source') {
+        checkout scm
+    }
+
+    withCredentials([file(credentialsId: JWT_KEY_CRED_ID, variable: 'jwt_key_file')]) {
+
+        stage('Authorize Org') {
+            def rc
+
+            if (isUnix()) {
+                rc = sh returnStatus: true,
+                    script: """
+                        ${toolbelt} org login jwt \
+                        --client-id ${CONNECTED_APP_CONSUMER_KEY} \
+                        --username ${HUB_ORG} \
+                        --jwt-key-file ${jwt_key_file} \
+                        --set-default-dev-hub \
+                        --instance-url ${SFDC_HOST}
+                    """
+            } else {
+                rc = bat returnStatus: true,
+                    script: """
+                        ${toolbelt} org login jwt --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file ${jwt_key_file} --set-default-dev-hub --instance-url ${SFDC_HOST}
+                    """
+            }
+
+            if (rc != 0) {
+                error "Hub org authorization failed"
+            }
+        }
+
+        stage('Run Apex Tests') {
+            echo "Running all Apex tests with code coverage…"
+
+            def raw
+
+            if (isUnix()) {
+                raw = sh returnStdout: true,
+                      script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json"
+            } else {
+                raw = bat returnStdout: true,
+                      script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json"
+            }
+
+            echo "RAW TEST RESULT JSON:"
+            echo raw
+
+            def json = new JsonSlurperClassic().parseText(raw)
+
+            testResult = json
+            testCoverage = json.result.summary.orgWideCoverage
+
+            echo "Org-wide Test Coverage = ${testCoverage}%"
+
+            if (testCoverage >= 75) {
+                echo "Coverage ≥ 75%. Deployment allowed."
+                shouldDeploy = true
+            } else {
+                echo "Coverage < 75%. Deployment will NOT proceed."
+                shouldDeploy = false
+            }
+        }
+
+        stage('Conditional Deployment') {
+            if (!shouldDeploy) {
+                echo "Skipping deployment because coverage is below threshold."
+                deployResult = "SKIPPED — Coverage ${testCoverage}%"
+                return
+            }
+
+            echo "Deploying metadata to Salesforce using manifest/package.xml…"
+
+            def rmsg
+
+            if (isUnix()) {
+                rmsg = sh returnStdout: true,
+                     script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json"
+            } else {
+                rmsg = bat returnStdout: true,
+                     script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json"
+            }
+
+            echo "Deployment Output:"
+            echo rmsg
+
+            deployResult = rmsg
+        }
+    }
+
+    stage('Send Email Notification') {
+        echo "Sending email about build/test/deploy status…"
+
+        def subject = "SF Deployment Result - Build #${BUILD_NUMBER}"
+        def body = """
+Build Number: ${BUILD_NUMBER}
+Org: ${HUB_ORG}
+
+Test Coverage: ${testCoverage}%
+Deployment Status: ${shouldDeploy ? "DEPLOYED" : "NOT DEPLOYED"}
+
+Raw Test Result:
+${testResult}
+
+Raw Deployment Result:
+${deployResult}
+"""
+
+        emailext (
+            to: 'admin@example.com',
+            subject: subject,
+            body: body
+        )
+    }
+}
