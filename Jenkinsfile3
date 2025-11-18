@@ -1,7 +1,6 @@
 #!groovy
 import groovy.json.JsonSlurper
 
-// --- SAFE JSON EXTRACTOR (WORKS ON WINDOWS/UNIX) ---
 String extractJson(String raw) {
     def start = raw.indexOf('{')
     if (start < 0) {
@@ -19,9 +18,11 @@ node {
     def CONNECTED_APP_CONSUMER_KEY = env.CONNECTED_APP_CONSUMER_KEY_DH
     def toolbelt = tool 'toolbelt'
 
-    def testResult
+    // Only store SIMPLE VALUES here (serializable)
     def testCoverage = 0
-    def deployResult
+    def deployStatus = "NOT RUN"
+    def testSummary = ""
+    def deploySummary = ""
     def shouldDeploy = false
 
     stage('Checkout Source') {
@@ -31,93 +32,57 @@ node {
     withCredentials([file(credentialsId: JWT_KEY_CRED_ID, variable: 'jwt_key_file')]) {
 
         stage('Authorize Org') {
-            def rc
-
-            if (isUnix()) {
-                rc = sh returnStatus: true, script: """
+            def rc = isUnix() ?
+                sh(returnStatus: true, script: """
                     ${toolbelt} org login jwt \
                     --client-id ${CONNECTED_APP_CONSUMER_KEY} \
                     --username ${HUB_ORG} \
                     --jwt-key-file ${jwt_key_file} \
                     --set-default-dev-hub \
                     --instance-url ${SFDC_HOST}
-                """
-            } else {
-                rc = bat returnStatus: true, script: """
+                """) :
+                bat(returnStatus: true, script: """
                     ${toolbelt} org login jwt --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file ${jwt_key_file} --set-default-dev-hub --instance-url ${SFDC_HOST}
-                """
-            }
+                """)
 
-            if (rc != 0) {
-                error "Hub org authorization failed"
-            }
+            if (rc != 0) error "Hub org authorization failed"
         }
 
         stage('Run Apex Tests') {
-            echo "Running Apex tests..."
-
-            def rawTest
-
-            if (isUnix()) {
-                rawTest = sh returnStdout: true,
-                    script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json"
-            } else {
-                rawTest = bat returnStdout: true,
-                    script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json"
-            }
-
-            echo "RAW TEST OUTPUT:"
-            echo rawTest
+            def rawTest = isUnix() ?
+                sh(returnStdout: true, script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json") :
+                bat(returnStdout: true, script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json")
 
             def cleanTest = extractJson(rawTest)
-            def jsonTest = new JsonSlurper().parseText(cleanTest)
+            def json = new JsonSlurper().parseText(cleanTest)
 
-            testResult = jsonTest
+            // Extract only simple fields
+            testCoverage = json?.result?.summary?.orgWideCoverage ?: 0
+            testSummary = "Test Run ID: ${json?.result?.testRunId}, Coverage: ${testCoverage}%"
 
-            if (jsonTest?.result?.summary?.orgWideCoverage != null) {
-                testCoverage = jsonTest.result.summary.orgWideCoverage
-            }
-
-            echo "Org-wide Coverage = ${testCoverage}%"
-
-            if (testCoverage >= 75) {
-                echo "Coverage sufficient. Deployment allowed."
-                shouldDeploy = true
-            } else {
-                echo "Coverage too low (${testCoverage}%). Deployment skipped."
-                shouldDeploy = false
-            }
+            shouldDeploy = testCoverage >= 75
         }
 
         stage('Conditional Deployment') {
-
             if (!shouldDeploy) {
-                deployResult = "SKIPPED — Coverage ${testCoverage}%"
-                echo deployResult
+                deployStatus = "SKIPPED (coverage ${testCoverage}%)"
+                deploySummary = deployStatus
                 return
             }
 
-            echo "Deploying metadata..."
-
-            def rawDeploy
-            if (isUnix()) {
-                rawDeploy = sh returnStdout: true,
-                    script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json"
-            } else {
-                rawDeploy = bat returnStdout: true,
-                    script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json"
-            }
-
-            echo "RAW DEPLOY OUTPUT:"
-            echo rawDeploy
+            def rawDeploy = isUnix() ?
+                sh(returnStdout: true, script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json") :
+                bat(returnStdout: true, script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json")
 
             def cleanDeploy = extractJson(rawDeploy)
-            deployResult = new JsonSlurper().parseText(cleanDeploy)
+            def json = new JsonSlurper().parseText(cleanDeploy)
+
+            deployStatus = json.status == 0 ? "SUCCESS" : "FAILED"
+            deploySummary = "Deploy Status: ${deployStatus}, ID: ${json?.result?.id}"
         }
     }
 
-    stage('Send Email Notification') {
-        echo "Sending email..."
+    stage('Send Email') {
 
         def subject = "SF Deployment Result (Build #${BUILD_NUMBER})"
         def body = """
@@ -125,13 +90,10 @@ Build Number: ${BUILD_NUMBER}
 Org: ${HUB_ORG}
 
 Test Coverage: ${testCoverage}%
-Deployment Status: ${shouldDeploy ? "DEPLOYED" : "NOT DEPLOYED"}
+Test Summary: ${testSummary}
 
-Test Run Result:
-${testResult}
-
-Deploy Result:
-${deployResult}
+Deployment: ${deployStatus}
+Deployment Details: ${deploySummary}
 """
 
         emailext(
