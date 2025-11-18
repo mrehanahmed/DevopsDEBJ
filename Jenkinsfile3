@@ -11,18 +11,15 @@ String extractJson(String raw) {
 
 node {
 
-    def BUILD_NUMBER = env.BUILD_NUMBER
     def HUB_ORG = env.HUB_ORG_DH
     def SFDC_HOST = env.SFDC_HOST_DH
     def JWT_KEY_CRED_ID = env.JWT_CRED_ID_DH
     def CONNECTED_APP_CONSUMER_KEY = env.CONNECTED_APP_CONSUMER_KEY_DH
     def toolbelt = tool 'toolbelt'
 
-    // Only store simple serializable values
+    def testRunId = null
     def testCoverage = 0
     def deployStatus = "NOT RUN"
-    def testSummary = ""
-    def deploySummary = ""
     def shouldDeploy = false
 
     stage('Checkout Source') {
@@ -32,69 +29,112 @@ node {
     withCredentials([file(credentialsId: JWT_KEY_CRED_ID, variable: 'jwt_key_file')]) {
 
         stage('Authorize Org') {
-            def rc = isUnix() ?
-                sh(returnStatus: true, script: """
-                    ${toolbelt} org login jwt \
-                    --client-id ${CONNECTED_APP_CONSUMER_KEY} \
-                    --username ${HUB_ORG} \
-                    --jwt-key-file ${jwt_key_file} \
-                    --set-default-dev-hub \
-                    --instance-url ${SFDC_HOST}
-                """) :
-                bat(returnStatus: true, script: """
-                    ${toolbelt} org login jwt --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file ${jwt_key_file} --set-default-dev-hub --instance-url ${SFDC_HOST}
-                """)
-
-            if (rc != 0) error "Hub org authorization failed"
+            bat """
+                ${toolbelt} org login jwt --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file %jwt_key_file% --set-default-dev-hub --instance-url ${SFDC_HOST}
+            """
         }
 
-        stage('Run Apex Tests') {
-            def rawTest = isUnix() ?
-                sh(returnStdout: true, script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json") :
-                bat(returnStdout: true, script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json")
+        stage('Start Apex Tests') {
 
-            def cleanTest = extractJson(rawTest)
-            def json = new JsonSlurper().parseText(cleanTest)
+            def rawStart = bat(
+                returnStdout: true,
+                script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json"
+            )
 
-            testCoverage = json?.result?.summary?.orgWideCoverage ?: 0
-            testSummary = "Test Run ID: ${json?.result?.testRunId}, Coverage: ${testCoverage}%"
+            def cleanStart = extractJson(rawStart)
+            def jsonStart = new JsonSlurper().parseText(cleanStart)
+
+            testRunId = jsonStart?.result?.testRunId
+            if (!testRunId) {
+                error "Could not extract testRunId from Salesforce CLI output"
+            }
+
+            echo "Started Apex Test Run: ${testRunId}"
+        }
+
+        stage('Wait For Test Completion') {
+
+            def status = "Queued"
+            int maxLoops = 30   // max 30 × 5 seconds = 150 secs
+            int count = 0
+
+            while (status in ["Queued", "Processing", "Pending"] && count < maxLoops) {
+
+                sleep 5
+
+                def rawPoll = bat(
+                    returnStdout: true,
+                    script: """
+                        ${toolbelt} data query --query "SELECT Status FROM ApexTestRunResult WHERE Id='${testRunId}'" --target-org ${HUB_ORG} --json
+                    """
+                )
+
+                def cleanPoll = extractJson(rawPoll)
+                def jsonPoll = new JsonSlurper().parseText(cleanPoll)
+
+                status = jsonPoll?.result?.records?.getAt(0)?.Status ?: "Unknown"
+
+                echo "Test Run Status: ${status}"
+                count++
+            }
+
+            if (status != "Completed") {
+                error "Test run did not complete. Final status: ${status}"
+            }
+        }
+
+        stage('Get Coverage Results') {
+
+            def rawCov = bat(
+                returnStdout: true,
+                script: "${toolbelt} apex get test --test-run-id ${testRunId} --target-org ${HUB_ORG} --json"
+            )
+
+            def cleanCov = extractJson(rawCov)
+            def jsonCov = new JsonSlurper().parseText(cleanCov)
+
+            testCoverage = jsonCov?.result?.summary?.orgWideCoverage ?: 0
+
+            echo "Final Code Coverage = ${testCoverage}%"
 
             shouldDeploy = testCoverage >= 75
         }
 
         stage('Conditional Deployment') {
+
             if (!shouldDeploy) {
                 deployStatus = "SKIPPED (coverage ${testCoverage}%)"
-                deploySummary = deployStatus
+                echo "Skipping deployment — coverage too low"
                 return
             }
 
-            def rawDeploy = isUnix() ?
-                sh(returnStdout: true, script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json") :
-                bat(returnStdout: true, script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json")
+            def rawDeploy = bat(
+                returnStdout: true,
+                script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json"
+            )
 
             def cleanDeploy = extractJson(rawDeploy)
-            def json = new JsonSlurper().parseText(cleanDeploy)
+            def jsonDeploy = new JsonSlurper().parseText(cleanDeploy)
 
-            deployStatus = json.status == 0 ? "SUCCESS" : "FAILED"
-            deploySummary = "Deploy Status: ${deployStatus}, ID: ${json?.result?.id}"
+            deployStatus = (jsonDeploy.status == 0) ? "SUCCESS" : "FAILED"
         }
     }
 
     stage('Output Results') {
+
         echo "============================================="
-        echo "  SALESFORCE CI RESULT - BUILD #${BUILD_NUMBER}"
+        echo "  SALESFORCE CI RESULT"
         echo "============================================="
         echo "Org: ${HUB_ORG}"
         echo ""
         echo "TEST RESULTS"
         echo "------------"
-        echo "${testSummary}"
+        echo "Test Run Id: ${testRunId}"
+        echo "Coverage: ${testCoverage}%"
         echo ""
         echo "DEPLOYMENT"
         echo "----------"
         echo "Status: ${deployStatus}"
-        echo "${deploySummary}"
         echo "============================================="
     }
 }
