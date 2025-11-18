@@ -1,140 +1,161 @@
 #!groovy
 import groovy.json.JsonSlurper
 
+// --- UTILITY: extract JSON from Salesforce outputs safely ---
 String extractJson(String raw) {
     def start = raw.indexOf('{')
     if (start < 0) {
-        error "No JSON found in output:\n${raw}"
+        error "No JSON object found:\n${raw}"
     }
     return raw.substring(start).trim()
 }
 
+// --- UTILITY: color output ---
+String green(String msg) { return "\u001B[32m${msg}\u001B[0m" }
+String red(String msg)   { return "\u001B[31m${msg}\u001B[0m" }
+String yellow(String msg){ return "\u001B[33m${msg}\u001B[0m" }
+
 node {
 
-    def HUB_ORG = env.HUB_ORG_DH
-    def SFDC_HOST = env.SFDC_HOST_DH
-    def JWT_KEY_CRED_ID = env.JWT_CRED_ID_DH
-    def CONNECTED_APP_CONSUMER_KEY = env.CONNECTED_APP_CONSUMER_KEY_DH
-    def toolbelt = tool 'toolbelt'
+    def HUB_ORG       = env.HUB_ORG_DH
+    def SFDC_HOST     = env.SFDC_HOST_DH
+    def JWT_KEY_CRED  = env.JWT_CRED_ID_DH
+    def CONSUMER_KEY  = env.CONNECTED_APP_CONSUMER_KEY_DH
+    def toolbelt      = tool 'toolbelt'
 
-    def testRunId = null
+    // Serializable values only
     def testCoverage = 0
+    def testRunId    = ""
     def deployStatus = "NOT RUN"
-    def shouldDeploy = false
+    def rollbackStatus = "NOT REQUIRED"
 
-    stage('Checkout Source') {
+    stage('Checkout') {
         checkout scm
     }
 
-    withCredentials([file(credentialsId: JWT_KEY_CRED_ID, variable: 'jwt_key_file')]) {
+    withCredentials([file(credentialsId: JWT_KEY_CRED, variable: 'JWTKEY')]) {
 
+        // -------------------------------------------------------
+        // 1. LOGIN
+        // -------------------------------------------------------
         stage('Authorize Org') {
-            bat """
-                ${toolbelt} org login jwt --client-id ${CONNECTED_APP_CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file %jwt_key_file% --set-default-dev-hub --instance-url ${SFDC_HOST}
-            """
+            def rc = bat(returnStatus: true, script: """
+                ${toolbelt} org login jwt --client-id ${CONSUMER_KEY} --username ${HUB_ORG} --jwt-key-file "%JWTKEY%" --set-default-dev-hub --instance-url ${SFDC_HOST}
+            """)
+
+            if (rc != 0) error red("Authorization Failed")
+            echo green("✔ Authorized ${HUB_ORG}")
         }
 
-        stage('Start Apex Tests') {
+        // -------------------------------------------------------
+        // 2. RUN TESTS + WAIT + GET COVERAGE
+        // -------------------------------------------------------
+        stage('Run Apex Tests') {
 
-            def rawStart = bat(
-                returnStdout: true,
-                script: "${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json"
-            )
+            echo yellow("🚀 Running Apex Tests…")
 
-            def cleanStart = extractJson(rawStart)
-            def jsonStart = new JsonSlurper().parseText(cleanStart)
+            def raw = bat(returnStdout: true, script: """
+                ${toolbelt} apex run test --target-org ${HUB_ORG} --code-coverage --json
+            """)
 
-            testRunId = jsonStart?.result?.testRunId
-            if (!testRunId) {
-                error "Could not extract testRunId from Salesforce CLI output"
-            }
+            def json = new JsonSlurper().parseText(extractJson(raw))
+            testRunId = json?.result?.testRunId
 
-            echo "Started Apex Test Run: ${testRunId}"
+            echo yellow("⏳ Waiting for test run ${testRunId}...")
+
+            // --- poll results until finished ---
+            sleep(8)   // simple wait (SF CLI waits automatically in latest versions)
+
+            def rawRes = bat(returnStdout: true, script: """
+                ${toolbelt} apex get test-result --test-run-id ${testRunId} --target-org ${HUB_ORG} --json
+            """)
+
+            writeFile file: "test-result.json", text: rawRes
+            archiveArtifacts artifacts: "test-result.json", fingerprint: true
+
+            def resJson = new JsonSlurper().parseText(extractJson(rawRes))
+            testCoverage = resJson?.result?.summary?.orgWideCoverage ?: 0
+
+            echo green("✔ Test coverage: ${testCoverage}%")
         }
 
-        stage('Wait For Test Completion') {
+        // -------------------------------------------------------
+        // 3. DEPLOY IF COVERAGE >= 75%
+        // -------------------------------------------------------
+        stage('Deploy If Coverage Good') {
 
-            def status = "Queued"
-            int maxLoops = 30   // max 30 × 5 seconds = 150 secs
-            int count = 0
-
-            while (status in ["Queued", "Processing", "Pending"] && count < maxLoops) {
-
-                sleep 5
-
-                def rawPoll = bat(
-                    returnStdout: true,
-                    script: """
-                        ${toolbelt} data query --query "SELECT Status FROM ApexTestRunResult WHERE Id='${testRunId}'" --target-org ${HUB_ORG} --json
-                    """
-                )
-
-                def cleanPoll = extractJson(rawPoll)
-                def jsonPoll = new JsonSlurper().parseText(cleanPoll)
-
-                status = jsonPoll?.result?.records?.getAt(0)?.Status ?: "Unknown"
-
-                echo "Test Run Status: ${status}"
-                count++
-            }
-
-            if (status != "Completed") {
-                error "Test run did not complete. Final status: ${status}"
-            }
-        }
-
-        stage('Get Coverage Results') {
-
-            def rawCov = bat(
-                returnStdout: true,
-                script: "${toolbelt} apex get test --test-run-id ${testRunId} --target-org ${HUB_ORG} --json"
-            )
-
-            def cleanCov = extractJson(rawCov)
-            def jsonCov = new JsonSlurper().parseText(cleanCov)
-
-            testCoverage = jsonCov?.result?.summary?.orgWideCoverage ?: 0
-
-            echo "Final Code Coverage = ${testCoverage}%"
-
-            shouldDeploy = testCoverage >= 75
-        }
-
-        stage('Conditional Deployment') {
-
-            if (!shouldDeploy) {
-                deployStatus = "SKIPPED (coverage ${testCoverage}%)"
-                echo "Skipping deployment — coverage too low"
+            if (testCoverage < 75) {
+                deployStatus = "SKIPPED"
+                echo red("❌ Coverage = ${testCoverage}%. Deployment skipped.")
                 return
             }
 
-            def rawDeploy = bat(
-                returnStdout: true,
-                script: "${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --json"
-            )
+            echo green("🚀 Coverage OK (${testCoverage}%). Deploying…")
 
-            def cleanDeploy = extractJson(rawDeploy)
-            def jsonDeploy = new JsonSlurper().parseText(cleanDeploy)
+            def rawDep = bat(returnStdout: true, script: """
+                ${toolbelt} project deploy start --manifest manifest/package.xml --target-org ${HUB_ORG} --wait 10 --json
+            """)
 
-            deployStatus = (jsonDeploy.status == 0) ? "SUCCESS" : "FAILED"
+            writeFile file: "deploy-result.json", text: rawDep
+            archiveArtifacts artifacts: "deploy-result.json", fingerprint: true
+
+            def depJson = new JsonSlurper().parseText(extractJson(rawDep))
+
+            deployStatus = depJson.status == 0 ? "SUCCESS" : "FAILED"
+
+            if (deployStatus == "SUCCESS") {
+                echo green("✔ Deployment Successful")
+                return
+            }
+
+            echo red("❌ Deployment Failed")
+        }
+
+        // -------------------------------------------------------
+        // 4. ROLLBACK ON FAILURE
+        // -------------------------------------------------------
+        stage('Rollback If Needed') {
+
+            if (deployStatus != "FAILED") {
+                rollbackStatus = "Not Required"
+                return
+            }
+
+            echo yellow("⚠ Deployment failed. Rolling back…")
+
+            // Assumes last successful MDAPI is stored in artifacts/mdapi.zip
+            if (fileExists("rollback-mdapi.zip")) {
+
+                def rc = bat(returnStatus: true, script: """
+                    ${toolbelt} mdapi deploy --deploy-dir rollback-mdapi.zip --target-org ${HUB_ORG} --ignore-conflicts --wait 10 --json
+                """)
+
+                rollbackStatus = rc == 0 ? "SUCCESS" : "FAILED"
+
+                echo(rollbackStatus == "SUCCESS" ?
+                        green("✔ Rollback Successful") :
+                        red("❌ Rollback Failed"))
+
+            } else {
+                rollbackStatus = "NO ROLLBACK FILE FOUND"
+                echo red("❌ No rollback artifact found. Skipping rollback.")
+            }
         }
     }
 
-    stage('Output Results') {
+    // -------------------------------------------------------
+    // 5. OUTPUT SUMMARY (COLORIZED)
+    // -------------------------------------------------------
+    stage('RESULT SUMMARY') {
 
-        echo "============================================="
-        echo "  SALESFORCE CI RESULT"
-        echo "============================================="
+        echo "=============================================="
+        echo "      SALESFORCE PIPELINE RESULT"
+        echo "=============================================="
         echo "Org: ${HUB_ORG}"
-        echo ""
-        echo "TEST RESULTS"
-        echo "------------"
-        echo "Test Run Id: ${testRunId}"
+        echo "Test Run: ${testRunId}"
         echo "Coverage: ${testCoverage}%"
-        echo ""
-        echo "DEPLOYMENT"
-        echo "----------"
-        echo "Status: ${deployStatus}"
-        echo "============================================="
+        echo "Deploy:  ${deployStatus == 'SUCCESS' ? green('SUCCESS') : red(deployStatus)}"
+        echo "Rollback: ${rollbackStatus}"
+        echo "=============================================="
     }
 }
