@@ -38,22 +38,22 @@ pipeline {
                         TARGET_USER = DEV_USERNAME
                         TARGET_ALIAS = "devOrg"
                         SHOULD_TEST = false
-                        echo "🌱 Branch develop → DEV org"
+                        echo "Branch develop → DEV org"
 
                     } else if (env.BRANCH_NAME == 'testing') {
                         TARGET_USER = UAT_USERNAME
                         TARGET_ALIAS = "uatOrg"
                         SHOULD_TEST = true
-                        echo "🧪 Branch testing → UAT org (tests ON)"
+                        echo "Branch testing → UAT org (tests ON)"
 
                     } else if (env.BRANCH_NAME == 'master') {
                         TARGET_USER = PROD_USERNAME
                         TARGET_ALIAS = "prodOrg"
                         SHOULD_TEST = true
-                        echo "🔥 Branch master → PROD org (tests ON)"
+                        echo "Branch master → PROD org (tests ON)"
 
                     } else {
-                        error "❌ Unsupported branch: ${env.BRANCH_NAME}"
+                        error "Unsupported branch: ${env.BRANCH_NAME}"
                     }
                 }
             }
@@ -61,7 +61,7 @@ pipeline {
 
         stage('Authorize Org') {
             steps {
-                echo "\u001B[32m✔ Authorizing ${TARGET_USER}\u001B[0m"
+                echo "[Authorizing ${TARGET_USER}"
 
                 script {
                     def rc = isUnix() ?
@@ -85,7 +85,7 @@ pipeline {
                         """)
 
                     if (rc != 0) {
-                        error "❌ Authorization failed for ${TARGET_USER}"
+                        error "Authorization failed for ${TARGET_USER}"
                     }
                 }
             }
@@ -95,7 +95,7 @@ pipeline {
             steps {
                 script {
                     if (params.DEPLOY_TYPE == 'source') {
-                        echo "🚀 Deploying source to ${TARGET_ALIAS}"
+                        echo "Deploying source to ${TARGET_ALIAS}"
 
                         def cmd = isUnix() ?
                             "sf project deploy start --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json" :
@@ -104,7 +104,7 @@ pipeline {
                         bat returnStdout: true, script: cmd
 
                     } else {
-                        echo "🚀 Deploying MDAPI to ${TARGET_ALIAS}"
+                        echo "Deploying MDAPI to ${TARGET_ALIAS}"
 
                         def cmd = isUnix() ?
                             "sf project deploy start --metadata-dir mdapi/ --target-org ${TARGET_ALIAS} --ignore-conflicts --wait 10 --json" :
@@ -121,7 +121,7 @@ pipeline {
                 expression { SHOULD_TEST == true }
             }
             steps {
-                echo "🧪 Running Apex tests for ${TARGET_ALIAS}"
+                echo "Running Apex tests for ${TARGET_ALIAS}"
 
                 script {
                     def rawStart = isUnix() ?
@@ -129,7 +129,7 @@ pipeline {
                         bat(script: "sf apex run test --testlevel RunLocalTests --target-org ${TARGET_ALIAS} --json", returnStdout: true).trim()
 
                     def runId = readJSON(text: rawStart).result.testRunId
-                    echo "⏳ Test Run ID: ${runId}"
+                    echo "Test Run ID: ${runId}"
 
                     timeout(time: 8, unit: 'MINUTES') {
                         waitUntil {
