@@ -53,7 +53,7 @@ node {
 				rmsg = sh returnStdout: true, script: "${toolbelt2}  project deploy start -d force-app -o ${HUB_ORG} --test-level RunLocalTests"
 			}else{
 				println 'project deploy start -d force-app -o HUB_ORG --test-level RunLocalTests'
-				rmsg = bat returnStdout: true, script: "${toolbelt2}  project deploy start -d force-app -o ${HUB_ORG} --test-level RunLocalTests"
+				rmsg = bat returnStdout: true, script: "${toolbelt2}  project deploy start -d force-app -o ${HUB_ORG} --no-zip"
 			   //rmsg = bat returnStdout: true, script: "${toolbelt2}  project deploy start -x manifest/package.xml -o ${HUB_ORG} --test-level RunLocalTests"
 			   //rmsg = bat returnStdout: true, script: "${toolbelt2}  force:mdapi:deploy -d manifest/. --target-org ${HUB_ORG}"
 			}
