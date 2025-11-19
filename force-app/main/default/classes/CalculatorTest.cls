@@ -20,7 +20,7 @@ private class CalculatorTest {
             Calculator cal = new Calculator();
             integer res  = cal.sub(10, 50);            
         Test.stopTest();
-        system.assertEquals(-5, res);
+        system.assertEquals(-40, res);
     }
 
 
