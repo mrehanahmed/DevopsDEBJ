@@ -16,7 +16,8 @@ node {
     println HUB_ORG
     println SFDC_HOST
     println CONNECTED_APP_CONSUMER_KEY
-    def toolbelt2 = tool 'toolbelt2'
+    def toolbelt2 = tool 'toolbelt2'    
+	def toolbelt = tool 'toolbelt'
 
     stage('checkout source') {
         // when running in multi-branch job, one must issue this command
