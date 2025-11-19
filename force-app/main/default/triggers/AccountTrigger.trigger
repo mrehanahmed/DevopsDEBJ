@@ -1,8 +1,14 @@
-trigger AccountTrigger on Account (before insert,before update) {
-    if(trigger.isInsert){
+trigger AccountTrigger on Account (before insert, before update, After insert)
+{
+            AccountTriggerHandler handler = new AccountTriggerHandler();
 
+    if (trigger.isInsert){
+        if(trigger.isBefore){
+            handler.BeforeInsert(Trigger.new);
+        }
     }
-    else if(trigger.IsUpdate){
-
-    }
+    if (Trigger.isAfter) {
+        handler.AfterInsert(Trigger.new);
+        }
+        
 }
