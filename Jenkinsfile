@@ -17,7 +17,7 @@ node {
     println SFDC_HOST
     println CONNECTED_APP_CONSUMER_KEY
     def toolbelt2 = tool 'toolbelt2'    
-	def toolbelt = tool 'toolbelt'
+	
 
     stage('checkout source') {
         // when running in multi-branch job, one must issue this command
@@ -54,7 +54,7 @@ node {
 				rmsg = sh returnStdout: true, script: "${toolbelt2}  project deploy start -d force-app -o ${HUB_ORG} --test-level RunLocalTests"
 			}else{
 				println 'project deploy start -d force-app -o HUB_ORG --test-level RunLocalTests'
-				rmsg = bat returnStdout: true, script: "${toolbelt}  project deploy start -d force-app -o ${HUB_ORG}"
+				rmsg = bat returnStdout: true, script: "${toolbelt2}  project deploy start -d force-app -o ${HUB_ORG} --test-level RunLocalTests"
 			   //rmsg = bat returnStdout: true, script: "${toolbelt2}  project deploy start -x manifest/package.xml -o ${HUB_ORG} --test-level RunLocalTests"
 			   //rmsg = bat returnStdout: true, script: "${toolbelt2}  force:mdapi:deploy -d manifest/. --target-org ${HUB_ORG}"
 			}
